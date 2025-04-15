@@ -29,12 +29,22 @@ if (missingEnvVars.length > 0) {
   process.exit(1);
 }
 
-// Global variable to store the current scheduled job
-let currentJob = null;
+// Store active scheduled jobs for each user
+const userJobs = new Map();
+
+// Add support for --check-only flag
+const isCheckOnly = process.argv.includes("--check-only");
 
 // Function to handle sending a new question
 async function handleNewQuestion(chatId, category = null) {
   try {
+    // Get the user
+    const user = await db.getUser(chatId);
+    if (!user) {
+      console.error(`User not found: ${chatId}`);
+      return false;
+    }
+
     // Generate a question using AI
     let questionData;
     let isUnique = false;
@@ -42,9 +52,8 @@ async function handleNewQuestion(chatId, category = null) {
 
     // Try to generate a unique question (max 3 attempts)
     while (!isUnique && attempts < 3) {
-      questionData = await aiService.generateQuestion(category);
-      console.log("Question data:", questionData);
-      isUnique = await db.isQuestionUnique(questionData.question);
+      questionData = await aiService.generateQuestion(category, chatId);
+      isUnique = await db.isQuestionUnique(user.id, questionData.question);
       attempts++;
     }
 
@@ -59,12 +68,18 @@ async function handleNewQuestion(chatId, category = null) {
     // Store the question in the database if successfully sent
     if (sent) {
       await db.saveQuestion(
+        user.id,
         questionData.question,
         questionData.answer,
         questionData.category
       );
+      // Update last question date
+      await db.updateLastQuestionDate(chatId);
       console.log(
-        `Question sent and saved: ${questionData.question.substring(0, 50)}...`
+        `Question sent to ${chatId} and saved: ${questionData.question.substring(
+          0,
+          50
+        )}...`
       );
     }
 
@@ -76,9 +91,9 @@ async function handleNewQuestion(chatId, category = null) {
 }
 
 // Function to reset database
-async function resetDatabase() {
+async function resetDatabase(userId = null) {
   try {
-    const count = await db.deleteAllQuestions();
+    const count = await db.deleteAllQuestions(userId);
     return count;
   } catch (error) {
     console.error("Error resetting database:", error);
@@ -86,83 +101,110 @@ async function resetDatabase() {
   }
 }
 
-// Function to create a new scheduler with specified cron expression
-function scheduleQuestions(cronExpression) {
+// Function to create or update a user's scheduler with specified cron expression
+function scheduleQuestionsForUser(chatId, cronExpression) {
   // Cancel existing job if it exists
-  if (currentJob) {
-    currentJob.cancel();
+  if (userJobs.has(chatId)) {
+    userJobs.get(chatId).cancel();
+    console.log(`Cancelled existing job for user ${chatId}`);
   }
 
   // Create new job with provided schedule
-  currentJob = schedule.scheduleJob(cronExpression, async () => {
-    console.log("Running scheduled job to send daily question");
-
-    // Use the chat ID from environment variable
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-
-    if (!chatId) {
-      console.error("Error: TELEGRAM_CHAT_ID not set in .env file");
-      return;
-    }
-
+  const job = schedule.scheduleJob(cronExpression, async function () {
+    console.log(
+      `Running scheduled job for user ${chatId} at ${new Date().toLocaleString()}`
+    );
     try {
       await handleNewQuestion(chatId);
     } catch (error) {
-      console.error("Error in scheduled job:", error);
+      console.error(`Error in scheduled job for user ${chatId}:`, error);
     }
   });
 
-  console.log(`Scheduled to send questions at: ${cronExpression}`);
-  return currentJob;
-}
+  if (job) {
+    // Calculate and log next invocation time
+    const nextInvocation = job.nextInvocation();
+    console.log(
+      `Next question for user ${chatId} scheduled for: ${
+        nextInvocation ? nextInvocation.toLocaleString() : "Unknown"
+      }`
+    );
 
-// Function to update schedule in the .env file
-function updateScheduleInEnvFile(schedule) {
-  try {
-    const envPath = path.resolve(__dirname, "../.env");
-    let envContent = fs.readFileSync(envPath, "utf8");
-
-    // Replace existing schedule or add it if not present
-    if (envContent.includes("QUESTION_SCHEDULE=")) {
-      envContent = envContent.replace(
-        /QUESTION_SCHEDULE=.*(\r?\n|$)/,
-        `QUESTION_SCHEDULE="${schedule}"$1`
-      );
-    } else {
-      envContent += `\nQUESTION_SCHEDULE="${schedule}"\n`;
-    }
-
-    fs.writeFileSync(envPath, envContent);
-    return true;
-  } catch (error) {
-    console.error("Error updating .env file:", error);
-    return false;
+    // Store the job reference
+    userJobs.set(chatId, job);
+    console.log(
+      `Scheduled questions for user ${chatId} with cron: ${cronExpression}`
+    );
+    return job;
+  } else {
+    console.error(
+      `Failed to schedule job for user ${chatId} with cron expression: ${cronExpression}`
+    );
+    return null;
   }
 }
 
-// Initialize the telegram bot with our question handler
-const bot = telegramService.initBot(
-  handleNewQuestion,
-  resetDatabase,
-  scheduleQuestions,
-  updateScheduleInEnvFile
-);
+// Initialize schedulers for all active users
+async function initializeAllSchedulers() {
+  try {
+    const users = await db.getAllUsers(true);
+    console.log(`Initializing schedulers for ${users.length} active users`);
 
-// Schedule daily question
-const scheduleRule = process.env.QUESTION_SCHEDULE || "0 9 * * *"; // Default to 9 AM daily
-currentJob = scheduleQuestions(scheduleRule);
+    for (const user of users) {
+      const schedule = user.schedule || "0 9 * * *";
+      scheduleQuestionsForUser(user.chat_id, schedule);
+    }
+  } catch (error) {
+    console.error("Error initializing schedulers:", error);
+  }
+}
+
+// Main initialization function
+async function init() {
+  try {
+    console.log("Initializing database...");
+    await db.initDatabase();
+    console.log("Database schema initialized and migrated if needed");
+
+    if (isCheckOnly) {
+      console.log("Check-only mode: database initialization successful");
+      console.log("Exiting without starting bot");
+      process.exit(0);
+    }
+
+    console.log("Initializing Telegram bot...");
+    // Initialize the telegram bot with our handlers
+    const bot = telegramService.initBot(
+      handleNewQuestion,
+      resetDatabase,
+      scheduleQuestionsForUser
+    );
+
+    console.log("Setting up schedulers...");
+    // Initialize scheduler for all users
+    await initializeAllSchedulers();
+
+    console.log("Application started successfully");
+    console.log(`Telegram bot initialized`);
+    console.log(`Database connected`);
+  } catch (error) {
+    console.error("Error during application initialization:", error);
+    process.exit(1);
+  }
+}
 
 // Handle application errors and shutdown
 process.on("SIGINT", () => {
   console.log("Shutting down...");
-  if (currentJob) {
-    currentJob.cancel();
+  // Cancel all scheduled jobs
+  for (const job of userJobs.values()) {
+    job.cancel();
   }
-  db.db.close();
+  if (db.db()) {
+    db.db().close();
+  }
   process.exit(0);
 });
 
-// Test connection by logging some information
-console.log("Application started successfully");
-console.log(`Telegram bot initialized`);
-console.log(`Database connected`);
+// Start the application
+init();
