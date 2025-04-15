@@ -109,39 +109,32 @@ function scheduleQuestionsForUser(chatId, cronExpression) {
     console.log(`Cancelled existing job for user ${chatId}`);
   }
 
-  // Create new job with provided schedule
-  const job = schedule.scheduleJob(cronExpression, async function () {
-    console.log(
-      `Running scheduled job for user ${chatId} at ${new Date().toLocaleString()}`
-    );
-    try {
-      await handleNewQuestion(chatId);
-    } catch (error) {
-      console.error(`Error in scheduled job for user ${chatId}:`, error);
+  // Create new job with provided schedule, specifying the system timezone
+  const job = schedule.scheduleJob(
+    {
+      rule: cronExpression,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone, // Use system timezone
+    },
+    async () => {
+      console.log(
+        `Running scheduled job for user ${chatId} at ${new Date().toLocaleString()}`
+      );
+      try {
+        await handleNewQuestion(chatId);
+      } catch (error) {
+        console.error(`Error in scheduled job for user ${chatId}:`, error);
+      }
     }
-  });
+  );
 
-  if (job) {
-    // Calculate and log next invocation time
-    const nextInvocation = job.nextInvocation();
-    console.log(
-      `Next question for user ${chatId} scheduled for: ${
-        nextInvocation ? nextInvocation.toLocaleString() : "Unknown"
-      }`
-    );
-
-    // Store the job reference
-    userJobs.set(chatId, job);
-    console.log(
-      `Scheduled questions for user ${chatId} with cron: ${cronExpression}`
-    );
-    return job;
-  } else {
-    console.error(
-      `Failed to schedule job for user ${chatId} with cron expression: ${cronExpression}`
-    );
-    return null;
-  }
+  // Store the job reference
+  userJobs.set(chatId, job);
+  console.log(
+    `Scheduled questions for user ${chatId} at: ${cronExpression} (Timezone: ${
+      Intl.DateTimeFormat().resolvedOptions().timeZone
+    })`
+  );
+  return job;
 }
 
 // Initialize schedulers for all active users

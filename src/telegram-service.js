@@ -214,6 +214,7 @@ function initBot(
       );
 
       try {
+        // Use the AI service to generate the question and answer
         const response = await aiService.generateQuestion(category, chatId);
 
         if (!response) {
@@ -227,26 +228,62 @@ function initBot(
           return;
         }
 
-        // Send the question
-        await bot.editMessageText(
-          `*${response.question}*\n\n${
-            response.options ? response.options.join("\n") : ""
-          }`,
-          {
-            chat_id: chatId,
-            message_id: loadingMessage.message_id,
-            parse_mode: "Markdown",
-          }
+        // NOTE: Saving is handled by handleNewQuestion in index.js for scheduled/q commands
+        // For direct /question [category], saving should ideally happen after successful send
+        // We rely on sendQuestion returning true/false for handleNewQuestion
+
+        // Send the question and answer using the dedicated function
+        const sent = await sendQuestion(
+          chatId,
+          response.question,
+          response.answer,
+          response.category
         );
 
-        // Wait a bit before sending the answer
-        setTimeout(async () => {
-          await bot.sendMessage(chatId, `*Answer:*\n${response.answer}`, {
-            parse_mode: "Markdown",
-          });
-        }, 500);
+        // If sending failed, edit the loading message
+        if (!sent) {
+          await bot.editMessageText(
+            "Sorry, there was an error sending the question or answer.",
+            {
+              chat_id: chatId,
+              message_id: loadingMessage.message_id,
+            }
+          );
+        } else {
+          // Optionally remove the "Generating..." message if send was successful
+          // await bot.deleteMessage(chatId, loadingMessage.message_id);
+          // Or edit it to confirm, though sendQuestion already sends the Q&A
+          await bot.editMessageText(
+            `Question sent! (Answer follows)`, // Placeholder edit
+            {
+              chat_id: chatId,
+              message_id: loadingMessage.message_id,
+            }
+          );
+          // We might want to just delete it silently
+          await bot
+            .deleteMessage(chatId, loadingMessage.message_id)
+            .catch((e) => console.error("Error deleting loading message:", e));
+
+          // If successful send, *NOW* save the question (relevant for direct /question command)
+          // Get user.id needed for saving
+          const user = await db.getUser(chatId);
+          if (user) {
+            await db.saveQuestion(
+              user.id, // Use correct user.id
+              response.question,
+              response.answer,
+              response.category
+            );
+          } else {
+            console.error(
+              `Could not find user with chat_id ${chatId} to save question for /question command.`
+            );
+          }
+        }
       } catch (error) {
-        console.error("Error generating question:", error);
+        // Catch errors specifically from aiService.generateQuestion
+        console.error("Error generating question via aiService:", error);
         await bot.editMessageText(
           "Sorry, there was an error generating your question. Please try again.",
           {
@@ -256,7 +293,11 @@ function initBot(
         );
       }
     } catch (error) {
-      console.error("Error in question command:", error);
+      // Catch broader errors in the command handler
+      console.error("Error in /question command handler:", error);
+      bot
+        .sendMessage(chatId, "An unexpected error occurred.")
+        .catch((e) => console.error("Failed to send error message:", e));
     }
   });
 
@@ -1013,6 +1054,8 @@ async function sendLoadingIndicator(chatId) {
 
 // Send a question and answer to the specified chat
 async function sendQuestion(chatId, question, answer, category = "general") {
+  let questionSentSuccessfully = false;
+  let answerSentSuccessfully = false;
   try {
     // Format category name for display
     const formattedCategory =
@@ -1022,24 +1065,190 @@ async function sendQuestion(chatId, question, answer, category = "general") {
     await bot.sendMessage(
       chatId,
       `*🧩 ${formattedCategory} Question:*\n\n${question}`,
-      {
-        parse_mode: "Markdown",
-      }
+      { parse_mode: "Markdown" }
     );
+    questionSentSuccessfully = true; // Mark question as sent
+
+    // Telegram message length limit
+    const MAX_LENGTH = 4000;
+    const answerPrefix = "*🔍 Answer:*\n\n";
 
     // Wait a moment before sending the answer
-    setTimeout(async () => {
-      // Send the answer in a separate message
-      await bot.sendMessage(chatId, `*🔍 Answer:*\n\n${answer}`, {
-        parse_mode: "Markdown",
-      });
-    }, 1000);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    return true;
+    // Function to send a single chunk, returns true on success, false on definite failure
+    async function sendChunk(chunk, isFirstChunk = false) {
+      const textToSend = isFirstChunk ? answerPrefix + chunk : chunk;
+      try {
+        console.log(
+          `Attempting to send chunk (Markdown: true, length: ${textToSend.length}) to ${chatId}`
+        );
+        await bot.sendMessage(chatId, textToSend, { parse_mode: "Markdown" });
+        console.log(`Chunk sent successfully (Markdown: true) to ${chatId}`);
+        return true; // Success with Markdown
+      } catch (error) {
+        const errorBody = error.response?.body || {};
+        const description =
+          typeof errorBody === "string"
+            ? errorBody
+            : errorBody.description || error.message;
+        console.warn(
+          `Failed to send chunk with Markdown to ${chatId}. Error: ${description}`
+        );
+        // Check if it's a known Markdown parsing error
+        if (description?.includes("can't parse entities")) {
+          console.log(
+            `Identified Markdown parsing error. Retrying chunk to ${chatId} without Markdown.`
+          );
+          try {
+            console.log(
+              `Attempting to send chunk (Markdown: false, length: ${textToSend.length}) to ${chatId}`
+            );
+            await bot.sendMessage(chatId, textToSend); // Retry without Markdown
+            console.log(
+              `Chunk sent successfully (Markdown: false) to ${chatId}`
+            );
+            return true; // Success without Markdown
+          } catch (retryError) {
+            const retryErrorBody = retryError.response?.body || {};
+            const retryDescription =
+              typeof retryErrorBody === "string"
+                ? retryErrorBody
+                : retryErrorBody.description || retryError.message;
+            console.error(
+              `Failed to send chunk even without Markdown to ${chatId}. Error: ${retryDescription}`
+            );
+            return false; // Definite failure after retry
+          }
+        } else {
+          console.error(
+            `Non-parsing error sending chunk to ${chatId}. Error will propagate.`
+          );
+          // For non-parsing errors, let the main catch handle it
+          // to potentially notify the user about a general send failure.
+          throw error; // Re-throw the original error
+        }
+      }
+    }
+
+    // Check if the answer needs splitting
+    if (answer.length + answerPrefix.length > MAX_LENGTH) {
+      const chunks = splitMessage(answer, MAX_LENGTH - answerPrefix.length);
+      let allChunksSent = true;
+
+      // Send the first chunk
+      if (!(await sendChunk(chunks[0], true))) {
+        allChunksSent = false;
+      }
+
+      // Send subsequent chunks only if previous ones succeeded
+      for (let i = 1; i < chunks.length && allChunksSent; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!(await sendChunk(chunks[i]))) {
+          allChunksSent = false;
+        }
+      }
+      answerSentSuccessfully = allChunksSent;
+    } else {
+      // Send the answer in a single message
+      answerSentSuccessfully = await sendChunk(answer, true);
+    }
+
+    // Return true only if both question and the complete answer (or all its chunks) were sent
+    return questionSentSuccessfully && answerSentSuccessfully;
   } catch (error) {
-    console.error("Error sending question:", error);
-    return false;
+    // Catch errors primarily from sending the *question* or unexpected issues
+    console.error(
+      `Error in sendQuestion function for chat ${chatId}:`,
+      error.response?.body || error.message
+    );
+    // Notify user about the general failure if the question likely failed
+    if (!questionSentSuccessfully) {
+      try {
+        await bot.sendMessage(
+          chatId,
+          "❌ Sorry, there was an error sending the question."
+        );
+      } catch (notifyError) {
+        console.error(
+          `Failed to notify user ${chatId} about question send error:`,
+          notifyError
+        );
+      }
+    }
+    // If the answer failed but wasn't caught by sendChunk's logic (should be rare)
+    else if (!answerSentSuccessfully) {
+      try {
+        await bot.sendMessage(
+          chatId,
+          "❌ Sorry, there was an error sending the full answer."
+        );
+      } catch (notifyError) {
+        console.error(
+          `Failed to notify user ${chatId} about answer send error:`,
+          notifyError
+        );
+      }
+    }
+    return false; // Overall function failed
   }
+}
+
+// Helper function to split long messages, respecting Markdown code blocks and newlines
+function splitMessage(text, maxLength) {
+  const chunks = [];
+  let currentChunk = "";
+  let inCodeBlock = false;
+  const lines = text.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineLength = line.length + 1; // +1 for newline character
+
+    // Check if adding the next line exceeds the limit
+    if (currentChunk.length + lineLength > maxLength) {
+      // If we exceed the limit, push the current chunk
+      if (currentChunk) {
+        // If the chunk we are about to push was inside a code block, close it
+        if (inCodeBlock) {
+          currentChunk += "\n```";
+        }
+        chunks.push(currentChunk);
+      }
+
+      // Start the new chunk
+      currentChunk = "";
+      // If the previous chunk ended inside a code block, start the new one with ticks
+      if (inCodeBlock) {
+        currentChunk = "```\n";
+      }
+    }
+
+    // Add the current line to the chunk
+    currentChunk +=
+      (currentChunk.endsWith("```\n") ||
+      currentChunk === "" ||
+      currentChunk.endsWith("\n")
+        ? ""
+        : "\n") + line;
+
+    // Toggle code block status *after* adding the line
+    if (line.trim().startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+    }
+  }
+
+  // Push the last remaining chunk
+  if (currentChunk) {
+    // Ensure final code block is closed if needed (though ideally it should be)
+    if (inCodeBlock && !currentChunk.trim().endsWith("```")) {
+      currentChunk += "\n```";
+    }
+    chunks.push(currentChunk);
+  }
+
+  // Filter out potentially empty chunks that might result from splitting logic
+  return chunks.filter((chunk) => chunk.trim().length > 0);
 }
 
 // Helper function to notify admins about new users
@@ -1054,6 +1263,19 @@ async function notifyAdminsAboutNewUser(userId, firstName, lastName) {
     }
 
     const userFullName = lastName ? `${firstName} ${lastName}` : firstName;
+    const message = `🔔 New user registered:\nID: ${userId}\nName: ${userFullName}\n\nTo approve this user, use the command:\n/approve ${userId}`;
+
+    // Send notification to all admins
+    for (const admin of admins) {
+      try {
+        await bot.sendMessage(admin.id, message);
+      } catch (error) {
+        console.error(
+          `Failed to notify admin ${admin.id} about new user:`,
+          error
+        );
+      }
+    }
   } catch (error) {
     console.error("Error notifying admins about new user:", error);
   }
@@ -1132,97 +1354,24 @@ async function toggleApprovalRequired(msg) {
   );
 }
 
-async function handleQuestion(msg) {
-  const chatId = msg.chat.id;
-  const question = msg.text.replace("/question", "").trim();
-
-  // Check if user exists and is approved
-  const user = await db.getUser(chatId);
-  const requireApproval = await db.getSetting("require_user_approval", 0);
-
-  if (!user) {
-    return bot.sendMessage(
-      chatId,
-      "You need to register first. Use /start to register."
-    );
-  }
-
-  if (requireApproval === 1 && user.is_approved !== 1) {
-    return bot.sendMessage(
-      chatId,
-      "Your account is pending approval. Please wait for an admin to approve your account."
-    );
-  }
-
-  // Check if user has API key if required
-  const apiKey = await db.getUserApiKey(chatId);
-  const requireApiKey = await db.getSetting("require_api_key", 0);
-
-  if (requireApiKey === 1 && !apiKey) {
-    return bot.sendMessage(
-      chatId,
-      "You need to set your Google Gemini API key before using the bot. Please use /setapikey command followed by your API key."
-    );
-  }
-
-  try {
-    bot.sendChatAction(chatId, "typing");
-
-    let finalQuestion = question;
-    let result;
-
-    if (!finalQuestion) {
-      // Generate a random question
-      result = await aiService.generateQuestion(null, chatId);
-      finalQuestion = result.question;
-    } else {
-      // User provided their own question
-      const genAI = new GoogleGenAI({ apiKey });
-      const response = await genAI.models.generateContent({
-        model: "gemini-pro",
-        contents: finalQuestion,
-      });
-      const text = response.text;
-
-      result = {
-        question: finalQuestion,
-        answer: text,
-      };
-    }
-
-    await bot.sendMessage(
-      chatId,
-      result.answer || "Sorry, I couldn't generate a response."
-    );
-
-    // Save the question in the database
-    if (finalQuestion) {
-      await db.saveQuestion(
-        chatId,
-        finalQuestion,
-        result.answer || "No answer generated"
-      );
-    }
-  } catch (error) {
-    console.error("Error handling question:", error);
-    bot.sendMessage(chatId, `Error generating response: ${error.message}`);
-  }
-}
-
 async function handleHelp(msg) {
   const chatId = msg.chat.id;
-  const user = await db.getUserById(chatId);
-  const isAdmin = chatId.toString() === process.env.TELEGRAM_CHAT_ID;
-  const isApproved = isAdmin || (user && user.isApproved);
+  try {
+    const user = await db.getUserById(chatId);
+    const isAdmin = chatId.toString() === process.env.TELEGRAM_CHAT_ID;
+    const isApproved = isAdmin || (user && user.isApproved);
 
-  let helpMessage = `🤖 JavaScript Interview Questions Bot - Help\n\n`;
+    let baseMessage = `🤖 *JavaScript Interview Questions Bot - Help*\n\n`;
 
-  if (!isApproved && !isAdmin) {
-    helpMessage += `⚠️ Your account is pending approval by an administrator. You'll be notified when approved.\n\n`;
-  }
+    if (!isApproved && !isAdmin) {
+      baseMessage += `⚠️ Your account is pending approval by an administrator. You'll be notified when approved.\n\n`;
+    }
 
-  helpMessage += `
-*Available Commands*:
+    // Send initial message
+    await bot.sendMessage(chatId, baseMessage, { parse_mode: "Markdown" });
+
+    // Send User Commands separately
+    let userCommands = `*Available Commands*:
 /start - Register with the bot
 /help - Show this help message
 /question - Generate a random question
@@ -1231,12 +1380,12 @@ async function handleHelp(msg) {
 /reset - Reset your question history
 /schedule [HH:MM] - Set up daily question schedule
 /stats - View your question statistics
-/setapikey - Set your Google Gemini API key
-  `;
+/setapikey - Set your Google Gemini API key`;
+    await bot.sendMessage(chatId, userCommands, { parse_mode: "Markdown" });
 
-  // Add admin commands if the user is an admin
-  if (user && user.isAdmin) {
-    helpMessage += `
+    // Send Admin Commands separately if applicable
+    if (user && user.isAdmin) {
+      let adminCommands = `
 *Admin Commands*:
 /users - List all registered users
 /pending - View users waiting for approval
@@ -1248,26 +1397,41 @@ async function handleHelp(msg) {
 /api_key_required - Toggle API key requirement
 /approval_required - Toggle user approval requirement
 /toggleapikey - Toggle API key requirement (alias)
-/toggleapproval - Toggle approval requirement (alias)
-    `;
+/toggleapproval - Toggle approval requirement (alias)`;
+      // Small delay before sending admin commands
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await bot.sendMessage(chatId, adminCommands, { parse_mode: "Markdown" });
+    }
+
+    // Send API Key status separately
+    const userApiKey = await db.getUserApiKey(chatId);
+    let apiKeyStatus = "";
+    if (!userApiKey) {
+      apiKeyStatus = `\nℹ️ For the best experience, please set your own Google Gemini API key using the /setapikey command. Without your own API key, question generation may be limited.`;
+    } else {
+      apiKeyStatus = `\n✅ You have set your personal API key.`;
+    }
+    // Small delay before sending API status
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await bot.sendMessage(chatId, apiKeyStatus, { parse_mode: "Markdown" });
+  } catch (error) {
+    console.error(
+      `Error in handleHelp for chat ${chatId}:`,
+      error.response?.body || error.message
+    );
+    // Attempt to notify user about the error
+    try {
+      await bot.sendMessage(
+        chatId,
+        "❌ Sorry, there was an error displaying the help message."
+      );
+    } catch (notifyError) {
+      console.error(
+        `Failed to notify user ${chatId} about help error:`,
+        notifyError
+      );
+    }
   }
-
-  // Add API key information
-  const userApiKey = await db.getUserApiKey(chatId);
-  if (!userApiKey) {
-    helpMessage += `\nℹ️ For the best experience, please set your own Google Gemini API key using the /setapikey command. Without your own API key, question generation may be limited.`;
-  } else {
-    helpMessage += `\n✅ You have set your personal API key.`;
-  }
-
-  bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
-}
-
-// Helper function to generate a random question
-async function generateRandomQuestion() {
-  // Use the aiService to generate a random question
-  const result = await aiService.generateQuestion();
-  return result.question;
 }
 
 module.exports = {

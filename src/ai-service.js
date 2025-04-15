@@ -67,9 +67,9 @@ function extractKeywords(question) {
 }
 
 // Get keywords from recent questions to avoid repetition
-async function getRecentQuestionKeywords() {
+async function getRecentQuestionKeywords(userId) {
   try {
-    const allQuestions = await db.getAllSentQuestions();
+    const allQuestions = await db.getAllSentQuestions(userId);
     // Sort by date descending and take the last 15
     return allQuestions
       .sort((a, b) => new Date(b.sent_date) - new Date(a.sent_date))
@@ -94,7 +94,7 @@ async function generateQuestion(
       CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
 
     // Get recent questions keywords to avoid repetition
-    const recentKeywords = await getRecentQuestionKeywords();
+    const recentKeywords = await getRecentQuestionKeywords(userId);
     const avoidTopicsText =
       recentKeywords.length > 0
         ? `\n\nAvoid questions about these topics: ${recentKeywords.join(", ")}`
@@ -105,47 +105,54 @@ async function generateQuestion(
 
     if (language === "es") {
       // Spanish prompt
-      prompt = `Genera una pregunta de entrevista detallada de nivel senior sobre ${category}.
+      prompt = `Genera una pregunta de entrevista de nivel senior sobre ${category} que se pueda discutir y resolver en aproximadamente 5 minutos.
+      Evita escenarios excesivamente complejos o que requieran diseñar sistemas grandes.
+      Enfócate en un concepto específico, un pequeño problema de código o una explicación clara.
 
       Responde SOLO con esta estructura JSON:
       
       {
-        "question": "Tu pregunta de entrevista en español aquí",
-        "answer": "Respuesta detallada con explicaciones, conceptos fundamentales y ejemplos de código"
+        "question": "Tu pregunta de entrevista en español aquí (clara y concisa)",
+        "answer": "Respuesta concisa y correcta, explicando el concepto clave o la solución"
       }
       
       Asegúrate que:
-      1. La pregunta sea clara y específica.
-      2. La respuesta sea didáctica y completa, explicando conceptos fundamentales.
-      3. Incluya ejemplos de código prácticos y bien comentados.
-      4. Mencione casos de uso reales o mejores prácticas.
-      5. Si es relevante, explique las ventajas/desventajas o comparativas con otras técnicas.
+      1. La pregunta sea típica de una entrevista técnica.
+      2. La respuesta sea directa y precisa.
+      3. Si es código, que sea un ejemplo breve y claro.
       
-      Ejemplos de preguntas:
-      - "Explica qué es un closure en JavaScript y proporciona ejemplos prácticos de su uso"
-      - "¿Cómo funciona el manejo de estados en Redux y cuáles son sus ventajas frente a otras soluciones?"
-      - "Explica el funcionamiento de los operadores Rest y Spread en JavaScript, sus diferencias y casos de uso"
+      Ejemplos de preguntas adecuadas:
+      - "¿Cuál es la diferencia entre '==' y '===' en JavaScript y cuándo usarías cada uno?"
+      - "Escribe una función que invierta una cadena de texto sin usar métodos incorporados."
+      - "Explica el concepto de 'event delegation' en el DOM."
+      - "¿Qué problema resuelve 'Promise.all' y cómo se usa?"
       
-      La respuesta debe ser extensa, didáctica y con ejemplos de código bien explicados.${avoidTopicsText}`;
+      La respuesta debe ser la solución o explicación directa y concisa.${avoidTopicsText}`;
     } else {
       // English prompt (default)
-      prompt = `Generate a detailed senior-level interview question about ${category}.
+      prompt = `Generate a senior-level interview question about ${category} that can be discussed and solved in about 5 minutes.
+      Avoid overly complex scenarios or large system design questions.
+      Focus on a specific concept, a small coding problem, or a clear explanation.
       
       Respond ONLY with this JSON structure:
       
       {
-        "question": "Your interview question here",
-        "answer": "Detailed answer with explanations, key concepts, and code examples"
+        "question": "Your interview question here (clear and concise)",
+        "answer": "Concise and correct answer, explaining the key concept or solution"
       }
       
       Ensure that:
-      1. The question is clear and specific.
-      2. The answer is educational and comprehensive, explaining fundamental concepts.
-      3. Include practical, well-commented code examples.
-      4. Mention real-world use cases or best practices.
-      5. If relevant, explain advantages/disadvantages or comparisons with other techniques.
+      1. The question is typical for a technical interview.
+      2. The answer is direct and accurate.
+      3. If code is involved, it's a short and clear example.
       
-      The answer should be extensive, educational, and include well-explained code examples.${avoidTopicsText}`;
+      Examples of suitable questions:
+      - "What's the difference between '==' and '===' in JavaScript and when would you use each?"
+      - "Write a function to reverse a string without using built-in methods."
+      - "Explain the concept of event delegation in the DOM."
+      - "What problem does 'Promise.all' solve and how is it used?"
+      
+      The answer should be the direct and concise solution or explanation.${avoidTopicsText}`;
     }
 
     // Get the AI client for this user
@@ -161,9 +168,6 @@ async function generateQuestion(
       model: "gemini-2.0-flash",
       contents: prompt,
     });
-
-    // Debug the raw response before extraction
-    console.log("Raw response:", response.text.substring(0, 100) + "...");
 
     // Extract and parse JSON from the response
     const result = extractJSON(response.text);
