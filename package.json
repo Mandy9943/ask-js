@@ -1,0 +1,26 @@
+{
+  "name": "js-interview-questions-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot that sends daily JavaScript, TypeScript, and React interview questions",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "javascript",
+    "interview",
+    "questions",
+    "telegram",
+    "bot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^0.8.0",
+    "dotenv": "^16.3.1",
+    "node-schedule": "^2.1.1",
+    "node-telegram-bot-api": "^0.61.0",
+    "sqlite3": "^5.1.6"
+  }
+}
