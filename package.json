@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "start:prod": "pm2 start src/index.js",
     "dev": "nodemon src/index.js",
     "test": "mocha tests/**/*.js",
     "migrate": "node src/migrations.js"
