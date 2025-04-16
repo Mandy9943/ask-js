@@ -933,12 +933,16 @@ Commands:
 
         // Simple test prompt
         const result = await genAI.models.generateContent({
-          model: "gemini-pro",
+          model: "gemini-2.0-flash",
           contents: "Say 'API key is valid'",
         });
         const text = result.text;
+        console.log("API Key validation response text:", text);
 
         if (!text || !text.includes("valid")) {
+          console.warn(
+            "API key validation failed - response did not include 'valid'."
+          );
           throw new Error("API key validation failed");
         }
 
@@ -1255,7 +1259,7 @@ function splitMessage(text, maxLength) {
 async function notifyAdminsAboutNewUser(userId, firstName, lastName) {
   try {
     // Get all admin users
-    const admins = await db.getAdmins();
+    const admins = await db.getAdminUsers();
 
     if (!admins || admins.length === 0) {
       console.log("No admins found to notify about new user");
