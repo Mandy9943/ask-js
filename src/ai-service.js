@@ -62,21 +62,29 @@ function extractJSON(text) {
 
 // Extract key concepts from previous questions
 function extractKeywords(question) {
-  // Truncate to first 40 characters if longer
-  return question.length > 100 ? question.substring(0, 100) + "..." : question;
+  // Truncate to first 150 characters if longer, aiming for the core topic
+  return question.length > 150
+    ? question.substring(0, 150).trim() + "..."
+    : question.trim();
 }
 
-// Get keywords from recent questions to avoid repetition
-async function getRecentQuestionKeywords(userId) {
+// Get topics from recent questions to avoid repetition
+async function getRecentQuestionTopics(dbUserId) {
+  if (!dbUserId) {
+    console.warn(
+      "Attempted to get recent topics without a valid database user ID."
+    );
+    return []; // Cannot fetch history without the correct ID
+  }
   try {
-    const allQuestions = await db.getAllSentQuestions(userId);
-    // Sort by date descending and take the last 15
+    const allQuestions = await db.getAllSentQuestions(dbUserId);
+    // Sort by date descending and take the last 20
     return allQuestions
       .sort((a, b) => new Date(b.sent_date) - new Date(a.sent_date))
-      .slice(0, 60)
-      .map((q) => extractKeywords(q.question));
+      .slice(0, 20) // Fetch last 20 questions
+      .map((q) => extractKeywords(q.question)); // Extract keywords/topics
   } catch (error) {
-    console.error("Error fetching recent questions:", error);
+    console.error("Error fetching recent question topics:", error);
     return [];
   }
 }
@@ -84,20 +92,35 @@ async function getRecentQuestionKeywords(userId) {
 // Generate a random JS/TS/React interview question and answer using Gemini
 async function generateQuestion(
   specificCategory = null,
-  userId = null,
+  chatId = null,
   language = "en"
 ) {
   try {
+    // First, get the internal database user ID from the chatId
+    let dbUserId = null;
+    if (chatId) {
+      const user = await db.getUser(chatId); // Fetch user by chat ID
+      if (user) {
+        dbUserId = user.id; // Get the actual database ID
+      } else {
+        console.warn(
+          `User not found for chatId ${chatId} in generateQuestion.`
+        );
+      }
+    }
+
     // Use specified category or pick randomly
     const category =
       specificCategory ||
       CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
 
-    // Get recent questions keywords to avoid repetition
-    const recentKeywords = await getRecentQuestionKeywords(userId);
+    // Get recent questions topics to avoid repetition, using the database user ID
+    const recentTopics = await getRecentQuestionTopics(dbUserId);
     const avoidTopicsText =
-      recentKeywords.length > 0
-        ? `\n\nAvoid questions about these topics: ${recentKeywords.join(", ")}`
+      recentTopics.length > 0
+        ? `\n\nCRITICAL INSTRUCTION: Ensure the new question is substantially different from the following topics recently asked to this user. Do NOT repeat or rephrase questions related to these topics:\n- ${recentTopics.join(
+            "\n- "
+          )}`
         : "";
 
     // Create appropriate prompt based on language preference
@@ -155,8 +178,8 @@ async function generateQuestion(
       The answer should be the direct and concise solution or explanation.${avoidTopicsText}`;
     }
 
-    // Get the AI client for this user
-    const ai = await getAIClient(userId);
+    // Get the AI client for this user (using chatId to get API key)
+    const ai = await getAIClient(chatId);
 
     // If no API key is available, throw an error
     if (!ai) {

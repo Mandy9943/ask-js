@@ -201,8 +201,32 @@ function initBot(
         }
       }
 
-      // Get category from message or use default
-      const category = match[1] ? match[1].toLowerCase().trim() : "javascript";
+      // Define available categories
+      const availableCategories = ["javascript", "typescript", "react"];
+
+      // Get category from message or select randomly
+      let category;
+      if (match[1]) {
+        category = match[1].toLowerCase().trim();
+        // Optional: Validate if the provided category is in our list
+        if (!availableCategories.includes(category)) {
+          // Handle invalid category, e.g., send a message and default or return
+          bot.sendMessage(
+            chatId,
+            `Invalid category '${match[1]}'. Using a random category.`
+          );
+          category =
+            availableCategories[
+              Math.floor(Math.random() * availableCategories.length)
+            ];
+        }
+      } else {
+        // No category provided, select one randomly
+        category =
+          availableCategories[
+            Math.floor(Math.random() * availableCategories.length)
+          ];
+      }
 
       // Send typing action to show the bot is processing
       bot.sendChatAction(chatId, "typing");
